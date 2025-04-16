@@ -1,39 +1,55 @@
-#include <gtkmm/application.h>
-#include <gtkmm/window.h>
-#include <gtkmm/label.h>
-#include <thread>
-#include <cstdlib>
+#include <gtkmm.h>
+#include <iostream>
+#include <fcntl.h>
+#include <unistd.h>
 
-class Dashboard : public Gtk::Window {
+class SensorDashboard : public Gtk::Window {
 public:
-    Dashboard() : label("Ambient Light: 0.00 lux") {
-        set_title("Sensor Dashboard");
-        set_default_size(400, 200);
+    SensorDashboard() {
+        set_title("Ambient Light Dashboard");
+        set_default_size(300, 200);
+        label.set_text("Lux: 0.00");
         add(label);
-        label.show();
+        show_all();
 
-        // Start sensor update thread
-        std::thread([this]() {
-            while (true) {
-                // Read sensor data (replace with actual command)
-                FILE* pipe = popen("./i2c_veml6030", "r");
-                char buffer[128];
-                fgets(buffer, sizeof(buffer), pipe);
-                pclose(pipe);
-                Glib::signal_idle().connect_once([this, buffer]() {
-                    label.set_text(buffer);
-                });
-                sleep(1);
-            }
-        }).detach();
+        // Open FIFO
+        fifo_fd = open("/tmp/sensor_fifo", O_RDONLY | O_NONBLOCK);
+        if (fifo_fd < 0) {
+            std::cerr << "Failed to open FIFO" << std::endl;
+            return;
+        }
+
+        // Set up IOChannel
+        channel = Glib::IOChannel::create_from_fd(fifo_fd);
+        channel->set_encoding("");
+        channel->set_buffered(false);
+        Glib::signal_io().connect(sigc::mem_fun(*this, &SensorDashboard::on_data_available), 
+                                 channel, Glib::IO_IN);
+    }
+
+    ~SensorDashboard() {
+        if (fifo_fd >= 0) ::close(fifo_fd);
     }
 
 private:
     Gtk::Label label;
+    int fifo_fd = -1;
+    Glib::RefPtr<Glib::IOChannel> channel;
+
+    bool on_data_available(Glib::IOCondition cond) {
+        if (cond & Glib::IO_IN) {
+            Glib::ustring line;
+            Glib::IOStatus status = channel->read_line(line);
+            if (status == Glib::IO_STATUS_NORMAL && !line.empty()) {
+                label.set_text(line);
+            }
+        }
+        return true; // Keep watching
+    }
 };
 
-int main(int argc, char* argv[]) {
-    auto app = Gtk::Application::create(argc, argv, "org.sensor.dashboard");
-    Dashboard dashboard;
-    return app->run(dashboard);
+int main(int argc, char *argv[]) {
+    auto app = Gtk::Application::create(argc, argv, "org.example.sensordashboard");
+    SensorDashboard window;
+    return app->run(window);
 }
